@@ -1242,6 +1242,16 @@ app.post(
   }
 );
 
+// forget password
+app.get("/api/ayush", authMiddleware, async (req, res) => {
+  try {
+    res.json({ message: "hi this is Ayush" });
+  } catch (error) {
+    console.error("Error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // --- Dashboard summary ---
 app.get(
   "/api/dashboard/summary",
