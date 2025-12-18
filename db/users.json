@@ -1,0 +1,17 @@
+{
+  "users": [
+    {
+      "id": "cb2ab501-3b72-44f8-b8a7-cb7c1d495ba3",
+      "role": "student",
+      "name": "Ayush",
+      "email": null,
+      "rollNumber": "25WU0801005",
+      "branch": "BCA",
+      "year": "1st year/ Sem 1",
+      "department": null,
+      "profilePhotoUrl": null,
+      "passwordHash": "$2a$10$T7QnFOfG27HOtmfqj6Zqxej/pQop2MvBC7IvJvZKDtYgS3bwXQfce",
+      "createdAt": "2025-12-07T05:20:52.764Z"
+    }
+  ]
+}

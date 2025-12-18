@@ -1,0 +1,30 @@
+{
+  "courses": [
+    {
+      "id": "c1",
+      "name": "Computational thinking and problem solving",
+      "code": "CS101",
+      "description": "Basics of programming, logic, and problem solving.",
+      "teacherId": null,
+      "students": [
+        "cb2ab501-3b72-44f8-b8a7-cb7c1d495ba3"
+      ]
+    },
+    {
+      "id": "c2",
+      "name": "Internet of Things",
+      "code": "EE201",
+      "description": "Logic gates, combinational and sequential circuits.",
+      "teacherId": null,
+      "students": []
+    },
+    {
+      "id": "c3",
+      "name": "Design Thinking",
+      "code": "CS201",
+      "description": "Arrays, linked lists, stacks, queues, trees, graphs.",
+      "teacherId": null,
+      "students": []
+    }
+  ]
+}
