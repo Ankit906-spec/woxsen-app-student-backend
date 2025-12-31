@@ -9,9 +9,67 @@ import { v2 as cloudinary } from "cloudinary";
 import { v4 as uuidv4 } from "uuid";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { google } from "googleapis";
+import { PassThrough } from "stream";
+import nodemailer from "nodemailer"; // Ensure this is installed or use dynamic import if strict
 
 dotenv.config();
 
+// --- Email Config (Brevo SMTP) ---
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_PASS = process.env.EMAIL_PASS;
+const ADMIN_EMAIL = "ankityadav94698@gmail.com";
+
+const transporter = nodemailer.createTransport({
+  host: "smtp-relay.brevo.com",
+  port: 465,
+  secure: true, // Use SSL for better reliability
+  auth: {
+    user: EMAIL_USER,
+    pass: EMAIL_PASS
+  },
+  debug: true, // Show debug output
+  logger: true // Log information in console
+});
+
+// Verify connection configuration on startup
+if (EMAIL_USER && EMAIL_PASS) {
+  transporter.verify((error, success) => {
+    if (error) {
+      console.error("❌ SMTP Connection Error:", error.message);
+      if (error.response) console.error("   SMTP Response:", error.response);
+    } else {
+      console.log("✅ SMTP Server is ready to take our messages");
+    }
+  });
+}
+
+const otpMap = new Map(); // Store OTPs: email -> { code, expires }
+
+async function sendEmail(to, subject, text) {
+  if (!EMAIL_USER || !EMAIL_PASS) {
+    console.log("==================================================");
+    console.log(`[MOCK EMAIL] To: ${to}`);
+    console.log(`[MOCK EMAIL] Subject: ${subject}`);
+    console.log(`[MOCK EMAIL] Body: ${text}`);
+    console.log("==================================================");
+    return;
+  }
+  try {
+    console.log(`[Email] Sending to ${to}...`);
+    const info = await transporter.sendMail({ from: EMAIL_USER, to, subject, text });
+    console.log(`✅ [Email] Sent successfully: ${info.messageId}`);
+  } catch (err) {
+    console.error("❌ [Email] Send error:", err.message);
+    if (err.response) console.error("   [Email] SMTP Response:", err.response);
+
+    // Fallback log so the developer can still see the OTP in console
+    console.warn("--------------------------------------------------");
+    console.warn(`[OTP FALLBACK LOG] To: ${to}`);
+    console.warn(`[OTP FALLBACK LOG] Message: ${text}`);
+    console.warn("--------------------------------------------------");
+  }
+}
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -39,6 +97,10 @@ app.use(
   })
 );
 app.use(express.json());
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
 
 // Multer: in-memory (no local files)
 const upload = multer({
@@ -53,9 +115,12 @@ const upload = multer({
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "application/vnd.ms-excel",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-powerpoint",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "text/plain",
     ];
     if (allowed.includes(file.mimetype)) cb(null, true);
-    else cb(new Error("Invalid file type"));
+    else cb(new Error(`Invalid file type: ${file.mimetype}. Allowed: PDF, Images, Word, Excel, PPT, Text.`));
   },
 }).array("files", 5);
 
@@ -69,61 +134,90 @@ mongoose
   });
 
 // Schemas
-const userSchema = new mongoose.Schema({
-  id: { type: String, unique: true }, // for JWT + consistency
-  role: { type: String, enum: ["student", "teacher"], required: true },
-  name: { type: String, required: true },
-  email: { type: String, default: null }, // Required for teacher, optional->required for student now
-  rollNumber: { type: String, default: null },
-  branch: { type: String, default: null },
-  year: { type: String, default: null },
-  department: { type: String, default: null },
-  profilePhotoUrl: { type: String, default: null },
-  passwordHash: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now },
-  otp: { type: String, default: null },
-  otpExpires: { type: Date, default: null },
+const fileSchema = new mongoose.Schema({
+  url: String,
+  originalName: String,
+  mimetype: String,
+  size: Number,
+  driveId: String
 });
-
-const fileSchema = new mongoose.Schema(
-  {
-    url: String,
-    originalName: String,
-    mimetype: String,
-    size: Number,
-  }
-);
 
 const submissionSchema = new mongoose.Schema(
   {
     studentId: String,
     files: [fileSchema],
-    submittedAt: Date,
+    submittedAt: { type: Date, default: Date.now },
     marks: { type: Number, default: null },
     feedback: { type: String, default: null },
+    status: { type: String, enum: ["submitted", "graded"], default: "submitted" },
   },
-  { _id: false }
+  { _id: true }
 );
+
+const userSchema = new mongoose.Schema({
+  id: { type: String, unique: true },
+  role: { type: String, enum: ["student", "teacher", "ta", "coordinator", "hod", "dean", "admin"], required: true },
+  rank: { type: String, default: null }, // Teaching Assistant, Assistant Professor, etc.
+  name: { type: String, required: true },
+  email: { type: String, default: null },
+  rollNumber: { type: String, default: null },
+  program: { type: String, enum: ["B.Tech", "BBA"], default: null },
+  branch: { type: String, default: null }, // Detailed branch (e.g., AIML - Tigers)
+  year: { type: Number, default: null },
+  semester: { type: Number, default: null },
+  department: { type: String, default: null },
+  profilePhotoUrl: { type: String, default: null },
+  expertise: { type: String, default: "" },
+  passwordHash: { type: String, required: true },
+  isApproved: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+  otp: { type: String, default: null },
+  otpExpires: { type: Date, default: null },
+});
 
 const courseSchema = new mongoose.Schema({
   id: { type: String, unique: true },
   name: String,
   code: { type: String, unique: true },
   description: { type: String, default: "" },
-  teacherId: String, // user.id
-  students: [String], // array of user.id (students)
-  materials: [fileSchema], // study materials
-  examDateSheets: [fileSchema], // exam date sheets
+  teacherId: String,
+  program: { type: String, enum: ["B.Tech", "BBA"] },
+  semester: Number,
+  sections: [String], // e.g. ["Tigers", "AIDs"] or "AIML - Tigers"
+  isMandatory: { type: Boolean, default: false },
+  instructorExpertise: { type: String, default: "" },
+  examDate: { type: Date, default: null },
+  examTime: { type: String, default: null }, // "HH:mm" format
+  students: [String],
+  materials: [{
+    originalName: String,
+    url: String,
+    fileType: { type: String, enum: ["file", "video"], default: "file" },
+    mimetype: String,
+    size: Number,
+    driveId: String,
+    createdAt: { type: Date, default: Date.now }
+  }],
+  examDateSheets: [{
+    id: String,
+    name: String,
+    type: { type: String, enum: ["file", "generated"], default: "file" },
+    url: String, // Drive link for files, JSON string for generated
+    content: String, // Or just use url for both
+    createdAt: { type: Date, default: Date.now }
+  }],
+  createdAt: { type: Date, default: Date.now }
 });
 
 const assignmentSchema = new mongoose.Schema({
   id: { type: String, unique: true },
-  courseId: String, // course.id
+  courseId: String,
   title: String,
   description: { type: String, default: "" },
   dueDate: String,
+  requiredTime: { type: Number, default: 0 }, // in hours
   maxMarks: Number,
-  createdBy: String, // teacher user.id
+  createdBy: String,
   createdAt: { type: Date, default: Date.now },
   attachments: { type: [fileSchema], default: [] },
   submissions: [submissionSchema],
@@ -131,8 +225,11 @@ const assignmentSchema = new mongoose.Schema({
 
 const messageSchema = new mongoose.Schema({
   id: { type: String, unique: true },
-  courseId: String,
+  courseId: String, // course.id (for course discussion)
+  subjectName: String, // (for common faculty subject discussion)
   userId: String,
+  userName: String,
+  userRole: String,
   content: String,
   createdAt: { type: Date, default: Date.now },
 });
@@ -146,12 +243,39 @@ const notificationSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+const analyticsEventSchema = new mongoose.Schema({
+  eventId: { type: String, unique: true },
+  sessionId: { type: String, required: true, index: true },
+  userId: { type: String, default: null, index: true },
+  eventType: { type: String, required: true, index: true },
+  eventData: { type: mongoose.Schema.Types.Mixed, default: {} },
+  timestamp: { type: Date, default: Date.now, index: true },
+  url: String,
+  pathname: String,
+  userAgent: String,
+  screenResolution: String,
+  viewportSize: String,
+  timeOnPage: Number,
+});
+
+const analyticsSessionSchema = new mongoose.Schema({
+  sessionId: { type: String, unique: true, required: true },
+  userId: { type: String, default: null },
+  startTime: { type: Date, default: Date.now },
+  endTime: { type: Date, default: null },
+  eventCount: { type: Number, default: 0 },
+  userAgent: String,
+  lastActivity: { type: Date, default: Date.now },
+});
+
 // Models
 const User = mongoose.model("User", userSchema);
 const Course = mongoose.model("Course", courseSchema);
 const Assignment = mongoose.model("Assignment", assignmentSchema);
 const Message = mongoose.model("Message", messageSchema);
 const Notification = mongoose.model("Notification", notificationSchema);
+const AnalyticsEvent = mongoose.model("AnalyticsEvent", analyticsEventSchema);
+const AnalyticsSession = mongoose.model("AnalyticsSession", analyticsSessionSchema);
 
 // --- Helpers ---
 
@@ -161,7 +285,6 @@ async function uploadToCloudinary(file, folder) {
     "base64"
   )}`;
 
-  // Use "raw" for non-image files to avoid "authenticated" delivery issues with PDFs
   const isImage = file.mimetype.startsWith("image/");
   const resourceType = isImage ? "image" : "raw";
 
@@ -171,9 +294,7 @@ async function uploadToCloudinary(file, folder) {
   };
 
   if (resourceType === "raw") {
-    // Authenticated for raw files to ensure secure delivery
     options.type = "authenticated";
-    // Preserve extension
     const ext = path.extname(file.originalname);
     if (ext) {
       options.public_id = uuidv4() + ext;
@@ -182,16 +303,104 @@ async function uploadToCloudinary(file, folder) {
 
   const result = await cloudinary.uploader.upload(base64, options);
 
-  // Cloudinary returns a signed secure_url automatically if type is 'authenticated'
-  // using this is safer than manual construction.
-  console.log("Uploaded File:", result.secure_url);
-
   return {
     url: result.secure_url,
     originalName: file.originalname,
     mimetype: file.mimetype,
     size: file.size,
   };
+}
+
+// --- Google Drive Integration ---
+const DRIVE_CLIENT_EMAIL = process.env.GOOGLE_DRIVE_CLIENT_EMAIL;
+const DRIVE_PRIVATE_KEY = process.env.GOOGLE_DRIVE_PRIVATE_KEY ? process.env.GOOGLE_DRIVE_PRIVATE_KEY.replace(/\\n/g, "\n").replace(/^"(.*)"$/, "$1") : null;
+const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+if (!DRIVE_CLIENT_EMAIL || !DRIVE_PRIVATE_KEY || !DRIVE_FOLDER_ID) {
+  console.warn("⚠️ Google Drive credentials or Folder ID missing in .env");
+}
+
+const auth = new google.auth.JWT({
+  email: DRIVE_CLIENT_EMAIL,
+  key: DRIVE_PRIVATE_KEY,
+  scopes: ["https://www.googleapis.com/auth/drive"]
+});
+
+const drive = google.drive({ version: "v3", auth });
+
+async function uploadToDrive(file) {
+  if (!DRIVE_CLIENT_EMAIL || !DRIVE_PRIVATE_KEY) {
+    console.warn("Google Drive credentials not set. Returning mock drive object.");
+    return {
+      url: "#",
+      driveId: "mock-" + uuidv4(),
+      originalName: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size
+    };
+  }
+
+  try {
+    console.log(`[Drive] Starting upload for: ${file.originalname} (${file.size} bytes)`);
+    const stream = new PassThrough();
+    stream.end(file.buffer);
+
+    const response = await drive.files.create({
+      requestBody: {
+        name: file.originalname,
+        parents: [DRIVE_FOLDER_ID]
+      },
+      media: {
+        mimeType: file.mimetype,
+        body: stream
+      },
+      fields: "id, webViewLink",
+      supportsAllDrives: true
+    });
+
+    console.log(`[Drive] File created. ID: ${response.data.id}`);
+
+    // Make it readable to anyone with the link (or manage properly per user if needed)
+    console.log(`[Drive] Setting permissions for: ${response.data.id}`);
+    await drive.permissions.create({
+      fileId: response.data.id,
+      requestBody: {
+        role: "reader",
+        type: "anyone"
+      },
+      supportsAllDrives: true
+    });
+
+    console.log(`[Drive] Upload complete for: ${file.originalname}`);
+
+    return {
+      url: response.data.webViewLink,
+      driveId: response.data.id,
+      originalName: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size
+    };
+  } catch (err) {
+    console.error(`[Drive] Upload error for ${file.originalname}:`, err.message);
+    if (err.response) {
+      console.error(`[Drive] Error response status: ${err.response.status}`);
+      console.error(`[Drive] Error response data:`, JSON.stringify(err.response.data));
+    }
+    throw err;
+  }
+}
+
+async function autoEnrollStudents(course) {
+  const matchingStudents = await User.find({
+    role: "student",
+    program: course.program,
+    semester: course.semester,
+    branch: { $in: course.sections }
+  });
+
+  const studentIds = matchingStudents.map(s => s.id);
+  course.students = [...new Set([...course.students, ...studentIds])];
+  await course.save();
 }
 
 // --- Auth middleware ---
@@ -223,75 +432,78 @@ app.post("/api/signup", async (req, res) => {
       name,
       email,
       rollNumber,
+      program,
       branch,
       year,
       department,
+      rank,
       password,
     } = req.body;
+
     if (!role || !name || !email || !password) {
-      return res
-        .status(400)
-        .json({ message: "Missing required fields (Name, Email, Password)" });
+      return res.status(400).json({ message: "Missing required fields" });
     }
 
     // Role-specific checks
     if (role === "student") {
-      if (!rollNumber || !branch || !year) {
-        return res.status(400).json({
-          message:
-            "Student must have rollNumber, branch and year",
-        });
+      if (!rollNumber || !program || !branch || !year) {
+        return res.status(400).json({ message: "Missing student fields" });
       }
-      const existingStudent = await User.findOne({
-        role: "student",
-        rollNumber,
-      });
+      // Roll number validation: 11 chars and contains "WU"
+      if (rollNumber.length !== 11 || !rollNumber.toUpperCase().includes("WU")) {
+        return res.status(400).json({ message: "Roll number must be 11 characters and contain 'WU'" });
+      }
+
+      const existingStudent = await User.findOne({ rollNumber: rollNumber.toUpperCase() });
       if (existingStudent) {
-        return res.status(400).json({
-          message: "Student with this roll number already exists",
-        });
+        return res.status(400).json({ message: "Roll number already exists" });
       }
-    } else if (role === "teacher") {
-      if (!department) {
-        return res.status(400).json({
-          message: "Teacher must have department",
-        });
+    } else if (["teacher", "ta", "coordinator", "hod", "dean"].includes(role)) {
+      if (role === "teacher") {
+        // 1. Verify static Institutional Code instead of dynamic OTP
+        const { otp: institutionalCode } = req.body;
+
+        if (!institutionalCode) return res.status(400).json({ message: "Institutional Code required" });
+        if (institutionalCode !== "97201") return res.status(400).json({ message: "Invalid Institutional Code" });
       }
-    } else {
-      return res.status(400).json({ message: "Invalid role" });
     }
 
-    // Check email uniqueness global or per role? Let's do per role or global. 
-    // Usually email is unique globally. Let's check generally.
-    const existingEmail = await User.findOne({ email });
+    const existingEmail = await User.findOne({ email: email.toLowerCase() });
     if (existingEmail) {
       return res.status(400).json({ message: "Email already registered" });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
+
+    // Derived semester logic
+    let derivedSemester = null;
+    if (role === "student" && year) {
+      // Assuming Sem 1 = Year 1 Sem 1, Sem 2 = Year 1 Sem 2, etc.
+      // Since user says semester is derived from year, but there are 2 semesters per year.
+      // I'll default to the start semester of that year.
+      derivedSemester = (parseInt(year) * 2) - 1;
+    }
+
     const newUser = new User({
       id: uuidv4(),
       role,
+      rank: rank || null,
       name,
-      email: email,
-      rollNumber: rollNumber || null,
+      email: email.toLowerCase(),
+      rollNumber: rollNumber ? rollNumber.toUpperCase() : null,
+      program: program || null,
       branch: branch || null,
-      year: year || null,
+      year: year ? parseInt(year) : null,
+      semester: derivedSemester,
       department: department || null,
-      profilePhotoUrl: null,
       passwordHash,
+      isApproved: (role === "student"), // Students approved by default? User said admin approval for teacher.
       createdAt: new Date(),
     });
 
     await newUser.save();
 
-    const token = jwt.sign(
-      { id: newUser.id, role: newUser.role },
-      JWT_SECRET,
-      {
-        expiresIn: "7d",
-      }
-    );
+    const token = jwt.sign({ id: newUser.id, role: newUser.role }, JWT_SECRET, { expiresIn: "7d" });
 
     res.json({
       token,
@@ -301,8 +513,10 @@ app.post("/api/signup", async (req, res) => {
         name: newUser.name,
         email: newUser.email,
         rollNumber: newUser.rollNumber,
+        program: newUser.program,
         branch: newUser.branch,
         year: newUser.year,
+        semester: newUser.semester,
         department: newUser.department,
       },
     });
@@ -312,7 +526,52 @@ app.post("/api/signup", async (req, res) => {
   }
 });
 
-// Login: student => rollNumber OR email, teacher => email
+// --- OTP Endpoints ---
+
+// Request OTP for Signup (Teacher) or General
+app.post("/api/auth/send-otp", async (req, res) => {
+  const { email, type } = req.body; // type: 'signup' or 'reset'
+  if (!email) return res.status(400).json({ message: "Email required" });
+
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires = Date.now() + 10 * 60 * 1000; // 10 mins
+
+  otpMap.set(email, { code, expires });
+
+  let subject = "Your OTP Code";
+  let text = `Your verification code is: ${code}`;
+  let to = email;
+
+  if (type === "signup") {
+    return res.status(400).json({ message: "Signup OTP is no longer required. Use Institutional Code." });
+  }
+
+  await sendEmail(to, subject, text);
+  res.json({ message: `OTP sent to ${to}` });
+});
+
+// Verify OTP & Reset Password
+app.post("/api/auth/reset-password-otp", async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+  if (!email || !otp || !newPassword) return res.status(400).json({ message: "All fields required" });
+
+  const record = otpMap.get(email);
+  if (!record || Date.now() > record.expires || record.code !== otp) {
+    return res.status(400).json({ message: "Invalid or expired OTP" });
+  }
+
+  const user = await User.findOne({ email });
+  if (!user) return res.status(404).json({ message: "User not found" });
+
+  const hashed = await bcrypt.hash(newPassword, 10);
+  user.passwordHash = hashed; // Corrected field name
+  await user.save();
+
+  otpMap.delete(email);
+  res.json({ message: "Password reset successfully" });
+});
+
+// Login
 app.post("/api/login", async (req, res) => {
   try {
     const { role, identifier, password } = req.body;
@@ -377,62 +636,21 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// --- Forgot Password ---
-app.post("/api/auth/forgot-password", async (req, res) => {
+// --- Courses ---
+// Get all courses with teacher info
+app.get("/api/courses", authMiddleware, async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ message: "Email required" });
-
-    const user = await User.findOne({ email });
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    // Generate 6 digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    user.otp = otp;
-    user.otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
-
-    await user.save();
-
-    // MOCK EMAIL SENDING
-    console.log(`\n=== EMAIL MOCK ===`);
-    console.log(`To: ${email}`);
-    console.log(`Subject: Password Reset OTP`);
-    console.log(`Your OTP is: ${otp}`);
-    console.log(`==================\n`);
-
-    res.json({ message: "OTP sent to email (check server console)" });
+    const courses = await Course.find();
+    const result = await Promise.all(courses.map(async (c) => {
+      const teacher = await User.findOne({ id: c.teacherId });
+      return {
+        ...c.toObject(),
+        teacherName: teacher ? teacher.name : "Unknown",
+        teacherRank: teacher ? teacher.rank : "",
+      };
+    }));
+    res.json(result);
   } catch (err) {
-    console.error("Forgot password error:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-// --- Reset Password ---
-app.post("/api/auth/reset-password", async (req, res) => {
-  try {
-    const { email, otp, newPassword } = req.body;
-    if (!email || !otp || !newPassword) {
-      return res.status(400).json({ message: "Missing fields" });
-    }
-
-    const user = await User.findOne({ email, otp });
-    if (!user) {
-      return res.status(400).json({ message: "Invalid OTP or Email" });
-    }
-
-    if (user.otpExpires < new Date()) {
-      return res.status(400).json({ message: "OTP expired" });
-    }
-
-    const passwordHash = await bcrypt.hash(newPassword, 10);
-    user.passwordHash = passwordHash;
-    user.otp = null;
-    user.otpExpires = null;
-    await user.save();
-
-    res.json({ message: "Password reset successful. Please login." });
-  } catch (err) {
-    console.error("Reset password error:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -481,7 +699,12 @@ app.put("/api/me", authMiddleware, async (req, res) => {
     if (user.role === "teacher") {
       if (department) user.department = department;
     }
-    if (profilePhotoUrl) user.profilePhotoUrl = profilePhotoUrl;
+    if (profilePhotoUrl) {
+      // If profilePhotoUrl is a buffer/file from a form, we'd use uploadToCloudinary.
+      // But currently script.js sends a URL string.
+      // I'll leave it as is for now, but ensure any file uploads for profile use Cloudinary.
+      user.profilePhotoUrl = profilePhotoUrl;
+    }
 
     if (currentPassword && newPassword) {
       const isMatch = await bcrypt.compare(
@@ -504,65 +727,35 @@ app.put("/api/me", authMiddleware, async (req, res) => {
   }
 });
 
-// --- Courses ---
-// Get all courses (search optional)
-app.get("/api/courses", authMiddleware, async (req, res) => {
-  const q = (req.query.q || "").toLowerCase();
-
-  let courses = await Course.find({});
-  if (q) {
-    courses = courses.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.code.toLowerCase().includes(q) ||
-        (c.description &&
-          c.description.toLowerCase().includes(q))
-    );
-  }
-
-  const teacherIds = [
-    ...new Set(courses.map((c) => c.teacherId).filter(Boolean)),
-  ];
-  const teachers = await User.find({ id: { $in: teacherIds } });
-  const teacherMap = new Map(
-    teachers.map((t) => [t.id, t.name])
-  );
-
-  const result = courses.map((c) => ({
-    ...c.toObject(),
-    teacherName: c.teacherId ? teacherMap.get(c.teacherId) : null,
-  }));
-
-  res.json(result);
-});
-
 // Teacher creates a course
 app.post("/api/courses", authMiddleware, async (req, res) => {
-  if (req.user.role !== "teacher") {
-    return res
-      .status(403)
-      .json({ message: "Only teachers can create courses" });
+  // Teaching assistants cannot create courses
+  if (["teacher", "coordinator", "hod", "dean", "admin"].indexOf(req.user.role) === -1) {
+    return res.status(403).json({ message: "Only faculty can create courses" });
   }
 
-  const { name, code, description } = req.body;
-  if (!name || !code) {
-    return res
-      .status(400)
-      .json({ message: "Name and code are required" });
+  const { name, code, description, program, semester, sections, isMandatory } = req.body;
+  if (!name || !code || !program || !semester) {
+    return res.status(400).json({ message: "Name, code, program, and semester are required" });
   }
 
   const existing = await Course.findOne({ code });
   if (existing) {
-    return res
-      .status(400)
-      .json({ message: "Course code already exists" });
+    return res.status(400).json({ message: "Course code already exists" });
   }
+
+  const user = await User.findOne({ id: req.user.id });
 
   const newCourse = new Course({
     id: uuidv4(),
     name,
     code,
     description: description || "",
+    program,
+    semester,
+    sections: sections || [],
+    isMandatory: isMandatory || false,
+    instructorExpertise: user?.expertise || "",
     teacherId: req.user.id,
     students: [],
     materials: [],
@@ -570,7 +763,83 @@ app.post("/api/courses", authMiddleware, async (req, res) => {
   });
 
   await newCourse.save();
+
+  // Auto-enroll students based on matching criteria
+  await autoEnrollStudents(newCourse);
+
   res.json(newCourse);
+});
+
+// Teacher deletes a course
+app.delete("/api/courses/:id", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const { reason, confirmCount } = req.body;
+
+  if (["teacher", "coordinator", "hod", "dean", "admin"].indexOf(req.user.role) === -1) {
+    return res.status(403).json({ message: "Not authorized" });
+  }
+
+  const course = await Course.findOne({ id });
+  if (!course) return res.status(404).json({ message: "Course not found" });
+
+  // Only the creator or higher roles (Admin, Dean, HoD) can delete
+  const canDelete = course.teacherId === req.user.id || ["admin", "dean", "hod"].includes(req.user.role);
+  if (!canDelete) return res.status(403).json({ message: "Unauthorized deletion" });
+
+  if (!reason || reason.split(/\s+/).length < 50) {
+    return res.status(400).json({ message: "A minimum 50-word reason is required for deletion" });
+  }
+
+  if (confirmCount < 4) {
+    return res.status(400).json({ message: "Deletion must be confirmed at least 4 times" });
+  }
+
+  await Course.deleteOne({ id });
+  res.json({ message: "Course deleted successfully" });
+});
+
+// Upload course material (or add video URL)
+app.post("/api/courses/:courseId/materials", authMiddleware, (req, res) => {
+  if (!["teacher", "ta", "coordinator", "hod"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Faculty only" });
+  }
+
+  upload(req, res, async (err) => {
+    if (err) return res.status(400).json({ message: err.message });
+    try {
+      const { courseId } = req.params;
+      const { videoUrl, originalName } = req.body;
+      const course = await Course.findOne({ id: courseId });
+      if (!course) return res.status(404).json({ message: "Course not found" });
+
+      if (videoUrl) {
+        course.materials.push({
+          originalName: originalName || "Video Link",
+          url: videoUrl,
+          fileType: "video",
+          mimetype: "text/url",
+          size: 0
+        });
+      } else {
+        const files = req.files || [];
+        for (const f of files) {
+          // Use Cloudinary instead of Drive to avoid service account quota issues
+          const meta = await uploadToCloudinary(f, "student-portal/materials");
+          course.materials.push({
+            ...meta,
+            fileType: "file"
+          });
+        }
+      }
+
+      await course.save();
+      res.json({ message: "Materials updated", count: course.materials.length });
+    } catch (e) {
+      console.error("[Material Upload Error]:", e);
+      console.error("Error stack:", e.stack);
+      res.status(500).json({ message: e.message || "Server error during upload" });
+    }
+  });
 });
 
 // Delete course material
@@ -604,8 +873,75 @@ app.delete("/api/courses/:courseId/materials/:fileId", authMiddleware, async (re
   res.json({ message: "Material deleted" });
 });
 
-// --- Date Sheets ---
-// Upload Date Sheet
+// Save generated calendar
+app.post("/api/courses/:courseId/datesheets/generate", authMiddleware, async (req, res) => {
+  if (!["teacher", "coordinator", "hod", "dean"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+  const { courseId } = req.params;
+  const { name, events } = req.body;
+  if (!events || events.length === 0) return res.status(400).json({ message: "Events are required" });
+
+  const course = await Course.findOne({ id: courseId });
+  if (!course) return res.status(404).json({ message: "Course not found" });
+
+  course.examDateSheets.push({
+    id: uuidv4(),
+    name: name || "Generated Calendar",
+    type: "generated",
+    url: JSON.stringify(events), // Store events as stringified JSON in url field
+    createdAt: new Date()
+  });
+
+  await course.save();
+  res.json({ message: "Calendar saved" });
+});
+// --- Date Sheets / Exam Schedule ---
+// Update Course (for Exam Schedule)
+app.put("/api/courses/:courseId", authMiddleware, async (req, res) => {
+  if (req.user.role !== "teacher") return res.status(403).json({ message: "Only teachers can update courses" });
+
+  const { courseId } = req.params;
+  const { examDate, examTime } = req.body; // Can extend to other fields
+
+  try {
+    const course = await Course.findOne({ id: courseId });
+    if (!course) return res.status(404).json({ message: "Course not found" });
+    if (course.teacherId !== req.user.id) return res.status(403).json({ message: "Not your course" });
+
+    if (examDate !== undefined) course.examDate = examDate;
+    if (examTime !== undefined) course.examTime = examTime;
+
+    await course.save();
+    res.json(course);
+  } catch (err) {
+    res.status(500).json({ message: "Update error" });
+  }
+});
+
+// Get aggregated exam schedule for student
+app.get("/api/student/exam-schedule", authMiddleware, async (req, res) => {
+  if (req.user.role !== "student") return res.status(403).json({ message: "Student only" });
+
+  try {
+    const myCourses = await Course.find({ students: req.user.id });
+    const schedule = myCourses
+      .filter(c => c.examDate)
+      .map(c => ({
+        courseName: c.name,
+        courseCode: c.code,
+        examDate: c.examDate,
+        examTime: c.examTime
+      }))
+      .sort((a, b) => new Date(a.examDate) - new Date(b.examDate));
+
+    res.json(schedule);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Teacher uploads date sheet (Legacy/Alternative)
 app.post("/api/courses/:courseId/datesheets", authMiddleware, (req, res) => {
   if (req.user.role !== "teacher") return res.status(403).json({ message: "Only teachers can upload date sheets" });
 
@@ -621,8 +957,12 @@ app.post("/api/courses/:courseId/datesheets", authMiddleware, (req, res) => {
       if (!course.examDateSheets) course.examDateSheets = []; // Safety init
 
       for (const f of files) {
-        const meta = await uploadToCloudinary(f, "datesheets");
-        course.examDateSheets.push(meta);
+        const meta = await uploadToDrive(f);
+        course.examDateSheets.push({
+          ...meta,
+          id: meta.driveId,
+          type: "file"
+        });
       }
       await course.save();
       res.json({ message: "Date sheets uploaded" });
@@ -651,7 +991,9 @@ app.delete("/api/courses/:courseId/datesheets/:fileId", authMiddleware, async (r
   if (course.teacherId !== req.user.id) return res.status(403).json({ message: "Not authorized" });
 
   const initialLen = course.examDateSheets.length;
-  course.examDateSheets = course.examDateSheets.filter(f => f._id && f._id.toString() !== fileId);
+  course.examDateSheets = course.examDateSheets.filter(f =>
+    (f.id !== fileId) && (!f._id || f._id.toString() !== fileId)
+  );
 
   if (course.examDateSheets.length === initialLen) return res.status(404).json({ message: "File not found" });
 
@@ -716,61 +1058,115 @@ app.get("/api/my-courses", authMiddleware, async (req, res) => {
   res.json(result);
 });
 
-// --- Notifications ---
-// Get (and generate) notifications for a student
-app.get("/api/notifications", authMiddleware, async (req, res) => {
-  if (req.user.role !== "student") {
-    return res.json([]);
+// Dashboard summary
+app.get("/api/dashboard/summary", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    const myCourses = await Course.find(
+      userRole === "student" ? { students: userId } : { teacherId: userId }
+    );
+    const myCoursesCount = myCourses.length;
+
+    if (userRole === "student") {
+      const courseIds = myCourses.map((c) => c.id);
+      const assignments = await Assignment.find({ courseId: { $in: courseIds } });
+      const pendingCount = assignments.filter((a) => {
+        const sub = a.submissions.find((s) => s.studentId === userId);
+        return !sub;
+      }).length;
+
+      res.json({
+        myCoursesCount,
+        pendingAssignmentsCount: pendingCount,
+      });
+    } else {
+      // Teacher grading summary
+      const assignments = await Assignment.find({ createdBy: userId });
+      let totalToGrade = 0;
+      assignments.forEach(a => {
+        const unmanagedCount = a.submissions.filter(s => s.status !== "graded").length;
+        totalToGrade += unmanagedCount;
+      });
+
+      res.json({
+        myCoursesCount,
+        submissionsToGradeCount: totalToGrade,
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
   }
+});
+
+// Common Subject Discussion Board for Teachers
+app.get("/api/faculty/discussion/:subjectName", authMiddleware, async (req, res) => {
+  if (!["teacher", "ta", "coordinator", "hod", "dean"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Faculty only" });
+  }
+  const { subjectName } = req.params;
+  const messages = await Message.find({ subjectName }).sort({ createdAt: -1 });
+  res.json(messages);
+});
+
+app.post("/api/faculty/discussion/:subjectName", authMiddleware, async (req, res) => {
+  if (!["teacher", "ta", "coordinator", "hod", "dean"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Faculty only" });
+  }
+  const { subjectName } = req.params;
+  const { content } = req.body;
+  const user = await User.findOne({ id: req.user.id });
+
+  const newMessage = new Message({
+    id: uuidv4(),
+    subjectName,
+    userId: req.user.id,
+    userName: user.name,
+    userRole: user.role,
+    content,
+  });
+
+  await newMessage.save();
+  res.json(newMessage);
+});
+// Get notifications for a student
+app.get("/api/notifications", authMiddleware, async (req, res) => {
+  if (req.user.role !== "student") return res.json([]);
 
   const studentId = req.user.id;
   const now = new Date();
-  const warningTime = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24h from now
 
   try {
-    // 1. LAZY GENERATION: Check for pending assignments due soon (< 24h)
+    // 1. Regenerate urgent notifications based on assignments
     const myCourses = await Course.find({ students: studentId });
     const courseIds = myCourses.map(c => c.id);
     const assignments = await Assignment.find({ courseId: { $in: courseIds } });
 
     for (const a of assignments) {
-      // Check if submitted
       const isSubmitted = a.submissions.some(s => s.studentId === studentId);
-      if (!isSubmitted) {
-        const due = new Date(a.dueDate);
-        // Requirement: "send notification for the deadline"
-        // Condition: Due in future < 24h OR Due in past (Overdue)
-        if (due > now && due < warningTime) {
-          const msg = `Reminder: Assignment "${a.title}" is due in less than 24 hours.`;
-          const exists = await Notification.findOne({ userId: studentId, message: msg });
-          if (!exists) {
-            await Notification.create({
-              id: uuidv4(),
-              userId: studentId,
-              message: msg,
-              type: "warning",
-              createdAt: now
-            });
-          }
-        } else if (due < now) {
-          const msg = `Overdue: Assignment "${a.title}" was due on ${due.toLocaleDateString()}.`;
-          const exists = await Notification.findOne({ userId: studentId, message: msg });
-          // Only notify if not already notified? Or notify once? 
-          // Simple dedupe prevents spam on every refresh.
-          if (!exists) {
-            await Notification.create({
-              id: uuidv4(),
-              userId: studentId,
-              message: msg,
-              type: "warning",
-              createdAt: now
-            });
-          }
+      if (isSubmitted) continue;
+
+      const due = new Date(a.dueDate);
+      const timeLeft = due - now;
+      const requiredMs = (a.requiredTime || 0) * 3600000;
+
+      // Condition: Notification turns red (urgent) if remaining time is twice the required time or less
+      if (timeLeft > 0 && timeLeft <= 2 * requiredMs) {
+        const msg = `URGENT: Assignment "${a.title}" requires ~${a.requiredTime}h. You have less than ${Math.round(timeLeft / 3600000)}h left!`;
+        const exists = await Notification.findOne({ userId: studentId, message: msg });
+        if (!exists) {
+          await Notification.create({
+            id: uuidv4(),
+            userId: studentId,
+            message: msg,
+            type: "warning",
+            createdAt: now
+          });
         }
       }
     }
 
-    // 2. Return all notifications
     const notifs = await Notification.find({ userId: studentId }).sort({ createdAt: -1 });
     res.json(notifs);
   } catch (err) {
@@ -794,7 +1190,7 @@ app.post("/api/assignments", authMiddleware, (req, res) => {
     }
 
     try {
-      const { courseId, title, description, dueDate, maxMarks } = req.body;
+      const { courseId, title, description, dueDate, maxMarks, requiredTime } = req.body;
       if (!courseId || !title || !dueDate || !maxMarks) {
         return res.status(400).json({ message: "Missing fields" });
       }
@@ -803,17 +1199,14 @@ app.post("/api/assignments", authMiddleware, (req, res) => {
       if (!course)
         return res.status(404).json({ message: "Course not found" });
       if (course.teacherId !== req.user.id) {
-        return res.status(403).json({
-          message: "You are not the teacher of this course",
-        });
+        return res.status(403).json({ message: "Not authorized" });
       }
 
-      const attachments = [];
-      if (req.files && req.files.length > 0) {
-        for (const file of req.files) {
-          const meta = await uploadToCloudinary(file, "attachments");
-          attachments.push(meta);
-        }
+      const newFiles = [];
+      const files = req.files || [];
+      for (const f of files) {
+        const meta = await uploadToDrive(f);
+        newFiles.push(meta);
       }
 
       const newAssignment = new Assignment({
@@ -822,10 +1215,11 @@ app.post("/api/assignments", authMiddleware, (req, res) => {
         title,
         description: description || "",
         dueDate,
-        maxMarks,
+        requiredTime: parseInt(requiredTime) || 0,
+        maxMarks: parseInt(maxMarks),
         createdBy: req.user.id,
         createdAt: new Date(),
-        attachments: attachments, // Using the new field
+        attachments: newFiles,
         submissions: [],
       });
 
@@ -844,9 +1238,26 @@ app.get(
   "/api/courses/:courseId/assignments",
   authMiddleware,
   async (req, res) => {
-    const { courseId } = req.params;
-    const assignments = await Assignment.find({ courseId });
-    res.json(assignments);
+    try {
+      const { courseId } = req.params;
+      const course = await Course.findOne({ id: courseId });
+      if (!course) return res.status(404).json({ message: "Course not found" });
+
+      if (req.user.role === "student") {
+        const student = await User.findOne({ id: req.user.id });
+        const isMatched = course.sections.includes(student.branch) && course.program === student.program;
+
+        if (!isMatched && !["admin", "dean"].includes(req.user.role)) {
+          // Optionally joined students cannot see assignments
+          return res.json([]);
+        }
+      }
+
+      const assignments = await Assignment.find({ courseId });
+      res.json(assignments);
+    } catch (e) {
+      res.status(500).json({ message: "Server error" });
+    }
   }
 );
 
@@ -894,10 +1305,7 @@ app.post(
 
         const uploadedFiles = [];
         for (const file of req.files || []) {
-          const meta = await uploadToCloudinary(
-            file,
-            "assignments"
-          );
+          const meta = await uploadToDrive(file);
           uploadedFiles.push(meta);
         }
 
@@ -1075,66 +1483,39 @@ app.get(
   authMiddleware,
   async (req, res) => {
     const { courseId } = req.params;
-    const messages = await Message.find({ courseId }).sort({
-      createdAt: 1,
-    });
+    const course = await Course.findOne({ id: courseId });
+    if (!course) return res.status(404).json({ message: "Course not found" });
 
-    const userIds = [
-      ...new Set(messages.map((m) => m.userId)),
-    ];
+    // Check enrollment? Usually yes, but maybe readable if public? Strict for now.
+    if (req.user.role === "student" && !course.students.includes(req.user.id)) {
+      return res.status(403).json({ message: "Not enrolled" });
+    }
+
+    // Optimize: Join with User to get names
+    // We can do a manual join or aggregation
+    const messages = await Message.find({ courseId }).sort({ createdAt: -1 }); // Newest First
+
+    // Populate user info
+    // Fetch all userIds
+    const userIds = [...new Set(messages.map(m => m.userId))];
     const users = await User.find({ id: { $in: userIds } });
-    const userMap = new Map(
-      users.map((u) => [u.id, u])
-    );
+    const userMap = new Map(users.map(u => [u.id, u]));
 
-    const result = messages.map((m) => {
-      const user = userMap.get(m.userId);
+    const result = messages.map(m => {
+      const u = userMap.get(m.userId);
       return {
-        ...m.toObject(),
-        userName: user ? user.name : "Unknown",
-        userRole: user ? user.role : null,
+        id: m.id,
+        content: m.content,
+        createdAt: m.createdAt,
+        userId: m.userId,
+        userName: u ? u.name : "Unknown",
+        userRole: u ? u.role : "?"
       };
     });
 
     res.json(result);
   }
 );
-
-// Get messages for a course
-app.get("/api/courses/:courseId/messages", authMiddleware, async (req, res) => {
-  const { courseId } = req.params;
-  const course = await Course.findOne({ id: courseId });
-  if (!course) return res.status(404).json({ message: "Course not found" });
-
-  // Check enrollment? Usually yes, but maybe readable if public? Strict for now.
-  if (req.user.role === "student" && !course.students.includes(req.user.id)) {
-    return res.status(403).json({ message: "Not enrolled" });
-  }
-
-  // Optimize: Join with User to get names
-  // We can do a manual join or aggregation
-  const messages = await Message.find({ courseId }).sort({ createdAt: -1 }); // Newest First
-
-  // Populate user info
-  // Fetch all userIds
-  const userIds = [...new Set(messages.map(m => m.userId))];
-  const users = await User.find({ id: { $in: userIds } });
-  const userMap = new Map(users.map(u => [u.id, u]));
-
-  const result = messages.map(m => {
-    const u = userMap.get(m.userId);
-    return {
-      id: m.id,
-      content: m.content,
-      createdAt: m.createdAt,
-      userId: m.userId,
-      userName: u ? u.name : "Unknown",
-      userRole: u ? u.role : "?"
-    };
-  });
-
-  res.json(result);
-});
 
 // Post a message in a course
 app.post(
@@ -1195,6 +1576,8 @@ app.post(
       });
     }
 
+    console.log(`[Materials] Upload request received for Course: ${req.params.courseId} from User: ${req.user.id}`);
+
     upload(req, res, async (err) => {
       if (err) {
         console.error("Upload error:", err);
@@ -1220,12 +1603,12 @@ app.post(
 
         const uploadedFiles = [];
         for (const file of req.files || []) {
-          const meta = await uploadToCloudinary(
-            file,
-            "materials"
-          );
+          const meta = await uploadToDrive(file);
           uploadedFiles.push(meta);
-          course.materials.push(meta);
+          course.materials.push({
+            ...meta,
+            fileType: "file"
+          });
         }
 
         await course.save();
@@ -1241,16 +1624,6 @@ app.post(
     });
   }
 );
-
-// forget password
-app.get("/api/ayush", authMiddleware, async (req, res) => {
-  try {
-    res.json({ message: "hi this is Ayush" });
-  } catch (error) {
-    console.error("Error:", error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
 
 // --- Dashboard summary ---
 app.get(
@@ -1342,7 +1715,235 @@ app.get("/health", (req, res) => {
   }
 });
 
-// --- Start server ---
-app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
+// --- Analytics Endpoints ---
+// Store analytics events
+app.post("/api/analytics/events", async (req, res) => {
+  try {
+    const { sessionId, userId, events } = req.body;
+
+    if (!sessionId || !events || !Array.isArray(events)) {
+      return res.status(400).json({ message: "Invalid request" });
+    }
+
+    // Create or update session
+    let session = await AnalyticsSession.findOne({ sessionId });
+    if (!session) {
+      session = new AnalyticsSession({
+        sessionId,
+        userId: userId || null,
+        startTime: new Date(),
+        userAgent: events[0]?.userAgent || null,
+        eventCount: 0,
+      });
+    }
+
+    // Store events
+    const savedEvents = [];
+    for (const event of events) {
+      try {
+        const analyticsEvent = new AnalyticsEvent({
+          ...event,
+          sessionId,
+          userId: userId || event.userId || null,
+        });
+        await analyticsEvent.save();
+        savedEvents.push(analyticsEvent);
+        session.eventCount += 1;
+      } catch (err) {
+        // Skip duplicate events (eventId unique constraint)
+        if (err.code !== 11000) {
+          console.error("Error saving event:", err);
+        }
+      }
+    }
+
+    session.lastActivity = new Date();
+    await session.save();
+
+    res.json({
+      message: "Events stored",
+      count: savedEvents.length,
+      sessionId,
+    });
+  } catch (err) {
+    console.error("Analytics events error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
+
+// Get session data
+app.get("/api/analytics/sessions/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    const session = await AnalyticsSession.findOne({ sessionId });
+    if (!session) {
+      return res.status(404).json({ message: "Session not found" });
+    }
+
+    const events = await AnalyticsEvent.find({ sessionId }).sort({ timestamp: 1 });
+
+    res.json({
+      session,
+      events,
+      eventCount: events.length,
+    });
+  } catch (err) {
+    console.error("Get session error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get all sessions
+app.get("/api/analytics/sessions", async (req, res) => {
+  try {
+    const { userId, startDate, endDate, limit = 100 } = req.query;
+
+    const query = {};
+    if (userId) query.userId = userId;
+    if (startDate || endDate) {
+      query.startTime = {};
+      if (startDate) query.startTime.$gte = new Date(startDate);
+      if (endDate) query.startTime.$lte = new Date(endDate);
+    }
+
+    const sessions = await AnalyticsSession.find(query)
+      .sort({ startTime: -1 })
+      .limit(parseInt(limit));
+
+    res.json(sessions);
+  } catch (err) {
+    console.error("Get sessions error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get analytics summary
+app.get("/api/analytics/summary", async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const dateFilter = {};
+    if (startDate || endDate) {
+      dateFilter.timestamp = {};
+      if (startDate) dateFilter.timestamp.$gte = new Date(startDate);
+      if (endDate) dateFilter.timestamp.$lte = new Date(endDate);
+    }
+
+    const totalEvents = await AnalyticsEvent.countDocuments(dateFilter);
+    const totalSessions = await AnalyticsSession.countDocuments(
+      startDate || endDate ? { startTime: dateFilter.timestamp } : {}
+    );
+    const uniqueUsers = await AnalyticsEvent.distinct("userId", dateFilter);
+
+    // Calculate average session duration (for completed sessions)
+    const avgDurationResult = await AnalyticsSession.aggregate([
+      {
+        $match: {
+          endTime: { $ne: null },
+          ...(startDate || endDate ? { startTime: dateFilter.timestamp } : {})
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          avgDuration: { $avg: { $subtract: ["$endTime", "$startTime"] } }
+        }
+      }
+    ]);
+
+    const avgSessionDurationMs = avgDurationResult.length > 0 ? avgDurationResult[0].avgDuration : 0;
+    const avgSessionDurationMin = Math.round(avgSessionDurationMs / 60000);
+
+    // Event type breakdown
+    const eventTypes = await AnalyticsEvent.aggregate([
+      { $match: dateFilter },
+      { $group: { _id: "$eventType", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ]);
+
+    // Page views
+    const pageViews = await AnalyticsEvent.aggregate([
+      { $match: { ...dateFilter, eventType: "page_view" } },
+      { $group: { _id: "$pathname", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ]);
+
+    // Most clicked buttons
+    const buttonClicks = await AnalyticsEvent.aggregate([
+      { $match: { ...dateFilter, eventType: "button_click" } },
+      { $group: { _id: "$eventData.buttonText", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]);
+
+    res.json({
+      summary: {
+        totalEvents,
+        totalSessions,
+        uniqueUsers: uniqueUsers.length,
+        avgSessionDuration: avgSessionDurationMin + "m",
+      },
+      eventTypes,
+      pageViews,
+      buttonClicks,
+    });
+  } catch (err) {
+    console.error("Analytics summary error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Export analytics data
+app.get("/api/analytics/export", async (req, res) => {
+  try {
+    const { format = "json", sessionId, startDate, endDate } = req.query;
+
+    const query = {};
+    if (sessionId) query.sessionId = sessionId;
+    if (startDate || endDate) {
+      query.timestamp = {};
+      if (startDate) query.timestamp.$gte = new Date(startDate);
+      if (endDate) query.timestamp.$lte = new Date(endDate);
+    }
+
+    const events = await AnalyticsEvent.find(query).sort({ timestamp: 1 }).lean();
+
+    if (format === "csv") {
+      // Convert to CSV
+      const csv = convertToCSV(events);
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=analytics_export.csv");
+      res.send(csv);
+    } else {
+      // JSON format
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Content-Disposition", "attachment; filename=analytics_export.json");
+      res.json(events);
+    }
+  } catch (err) {
+    console.error("Export error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Helper function to convert events to CSV
+function convertToCSV(events) {
+  if (events.length === 0) return "";
+
+  const headers = ["eventId", "sessionId", "userId", "eventType", "timestamp", "url", "pathname"];
+  const rows = events.map(event =>
+    headers.map(header => {
+      const value = event[header] || "";
+      return typeof value === "string" && value.includes(",") ? `"${value}"` : value;
+    }).join(",")
+  );
+
+
+  return [headers.join(","), ...rows].join("\n");
+}
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
+
