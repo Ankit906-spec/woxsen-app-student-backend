@@ -22,14 +22,14 @@ const ADMIN_EMAIL = "ankityadav94698@gmail.com";
 
 const transporter = nodemailer.createTransport({
   host: "smtp-relay.brevo.com",
-  port: 465,
-  secure: true, // Use SSL for better reliability
+  port: 587,
+  secure: false, // Use STARTTLS on port 587
   auth: {
     user: EMAIL_USER,
     pass: EMAIL_PASS
   },
-  debug: true, // Show debug output
-  logger: true // Log information in console
+  debug: true,
+  logger: true
 });
 
 // Verify connection configuration on startup
@@ -57,7 +57,16 @@ async function sendEmail(to, subject, text) {
   }
   try {
     console.log(`[Email] Sending to ${to}...`);
-    const info = await transporter.sendMail({ from: EMAIL_USER, to, subject, text });
+
+    // Check if EMAIL_USER is a valid email, if not use a generic sender with ADMIN_EMAIL as fallback
+    const fromAddress = EMAIL_USER.includes("@") ? EMAIL_USER : ADMIN_EMAIL;
+
+    const info = await transporter.sendMail({
+      from: `"HorizonX Student Portal" <${fromAddress}>`,
+      to,
+      subject,
+      text
+    });
     console.log(`✅ [Email] Sent successfully: ${info.messageId}`);
   } catch (err) {
     console.error("❌ [Email] Send error:", err.message);
@@ -68,6 +77,9 @@ async function sendEmail(to, subject, text) {
     console.warn(`[OTP FALLBACK LOG] To: ${to}`);
     console.warn(`[OTP FALLBACK LOG] Message: ${text}`);
     console.warn("--------------------------------------------------");
+
+    // Throw error so the API can return a failure to the user
+    throw new Error(`Failed to send email: ${err.message}. Please contact support.`);
   }
 }
 const __filename = fileURLToPath(import.meta.url);
@@ -530,45 +542,78 @@ app.post("/api/signup", async (req, res) => {
 
 // Request OTP for Signup (Teacher) or General
 app.post("/api/auth/send-otp", async (req, res) => {
-  const { email, type } = req.body; // type: 'signup' or 'reset'
-  if (!email) return res.status(400).json({ message: "Email required" });
+  try {
+    const { email, type } = req.body; // type: 'signup' or 'reset'
+    if (!email) return res.status(400).json({ message: "Email required" });
 
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expires = Date.now() + 10 * 60 * 1000; // 10 mins
+    const normalizedEmail = email.trim().toLowerCase();
 
-  otpMap.set(email, { code, expires });
+    // If it's a password reset, verify the user exists first
+    if (type === "reset") {
+      const user = await User.findOne({ email: normalizedEmail });
+      if (!user) {
+        return res.status(404).json({ message: "No account found with this email address." });
+      }
+    }
 
-  let subject = "Your OTP Code";
-  let text = `Your verification code is: ${code}`;
-  let to = email;
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = Date.now() + 10 * 60 * 1000; // 10 mins
 
-  if (type === "signup") {
-    return res.status(400).json({ message: "Signup OTP is no longer required. Use Institutional Code." });
+    otpMap.set(normalizedEmail, { code, expires });
+
+    let subject = "Your OTP Code";
+    let text = `Your verification code is: ${code}`;
+    let to = normalizedEmail;
+
+    if (type === "signup") {
+      return res.status(400).json({ message: "Signup OTP is no longer required. Use Institutional Code." });
+    }
+
+    console.log(`[OTP] Generated ${code} for ${to}. Expires in 10m.`);
+    await sendEmail(to, subject, text);
+    res.json({ message: `OTP sent successfully to ${to}` });
+  } catch (err) {
+    console.error("❌ Send OTP API Error:", err.message);
+    res.status(500).json({ message: err.message });
   }
-
-  await sendEmail(to, subject, text);
-  res.json({ message: `OTP sent to ${to}` });
 });
 
 // Verify OTP & Reset Password
 app.post("/api/auth/reset-password-otp", async (req, res) => {
-  const { email, otp, newPassword } = req.body;
-  if (!email || !otp || !newPassword) return res.status(400).json({ message: "All fields required" });
+  try {
+    const { email, otp, newPassword } = req.body;
+    if (!email || !otp || !newPassword) return res.status(400).json({ message: "All fields required" });
 
-  const record = otpMap.get(email);
-  if (!record || Date.now() > record.expires || record.code !== otp) {
-    return res.status(400).json({ message: "Invalid or expired OTP" });
+    const normalizedEmail = email.trim().toLowerCase();
+    const record = otpMap.get(normalizedEmail);
+
+    if (!record || Date.now() > record.expires || record.code !== otp) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    user.passwordHash = hashed;
+    await user.save();
+
+    otpMap.delete(normalizedEmail);
+    res.json({ message: "Password reset successfully" });
+  } catch (err) {
+    console.error("❌ Reset Password API Error:", err.message);
+    res.status(500).json({ message: err.message });
   }
+});
 
-  const user = await User.findOne({ email });
-  if (!user) return res.status(404).json({ message: "User not found" });
-
-  const hashed = await bcrypt.hash(newPassword, 10);
-  user.passwordHash = hashed; // Corrected field name
-  await user.save();
-
-  otpMap.delete(email);
-  res.json({ message: "Password reset successfully" });
+// Test SMTP connectivity
+app.get("/api/auth/test-smtp", async (req, res) => {
+  try {
+    await sendEmail(ADMIN_EMAIL, "SMTP Test", "If you receive this, your SMTP configuration is working correctly.");
+    res.json({ message: "Test email sent to " + ADMIN_EMAIL });
+  } catch (err) {
+    res.status(500).json({ message: "SMTP Test failed: " + err.message });
+  }
 });
 
 // Login
@@ -719,11 +764,51 @@ app.put("/api/me", authMiddleware, async (req, res) => {
     }
 
     await user.save();
-
     res.json({ message: "Profile updated" });
   } catch (err) {
     console.error("Update profile error:", err);
     res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Single file upload for profile photo
+const uploadSinglePhoto = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) cb(null, true);
+    else cb(new Error("Only images are allowed for profile photo."));
+  }
+}).single("photo");
+
+// Update profile photo
+app.post("/api/me/photo", authMiddleware, uploadSinglePhoto, async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+    const result = await uploadToCloudinary(req.file, "profile_photos");
+    const user = await User.findOne({ id: req.user.id });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    user.profilePhotoUrl = result.url;
+    await user.save();
+    res.json({ url: result.url });
+  } catch (err) {
+    console.error("Photo upload error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Get user avatar
+app.get("/api/users/:id/avatar", async (req, res) => {
+  try {
+    const user = await User.findOne({ id: req.params.id });
+    if (user && user.profilePhotoUrl) {
+      return res.redirect(user.profilePhotoUrl);
+    }
+    const name = user ? user.name : "User";
+    res.redirect(`https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=02040a&color=00ffff`);
+  } catch (err) {
+    res.status(500).send("Error");
   }
 });
 
