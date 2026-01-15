@@ -88,7 +88,7 @@ const __dirname = path.dirname(__filename);
 // --- Config ---
 const app = express();
 const PORT = process.env.PORT || 4000;
-const JWT_SECRET = process.env.JWT_SECRET || "super-secret-jwt-key-981287918273";
+const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-this";
 const MONGODB_URI =
   process.env.MONGODB_URI ||
   "mongodb+srv://pptkumar_db_user:<db_password>@student-cluster.u2hbhrq.mongodb.net/student-portal?retryWrites=true&w=majority";
@@ -168,7 +168,7 @@ const submissionSchema = new mongoose.Schema(
 
 const userSchema = new mongoose.Schema({
   id: { type: String, unique: true },
-  role: { type: String, enum: ["student", "teacher", "ta", "coordinator", "hod", "dean", "admin"], required: true },
+  role: { type: String, enum: ["student", "teacher", "ta", "coordinator", "hod", "pd", "dean", "admin"], required: true },
   rank: { type: String, default: null }, // Teaching Assistant, Assistant Professor, etc.
   name: { type: String, required: true },
   email: { type: String, default: null },
@@ -245,7 +245,6 @@ const messageSchema = new mongoose.Schema({
   content: String,
   createdAt: { type: Date, default: Date.now },
 });
-
 const notificationSchema = new mongoose.Schema({
   id: { type: String, unique: true },
   userId: String,
@@ -253,6 +252,31 @@ const notificationSchema = new mongoose.Schema({
   type: { type: String, default: "info" }, // info, warning
   isRead: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
+});
+
+const scheduleSchema = new mongoose.Schema({
+  id: { type: String, unique: true },
+  title: String,
+  type: { type: String, enum: ["class", "holiday"], default: "class" },
+  start: Date,
+  end: Date,
+  description: String,
+  program: String,
+  year: Number,
+  semester: Number,
+  createdBy: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
+const broadcastSchema = new mongoose.Schema({
+  id: { type: String, unique: true },
+  content: String,
+  senderId: String,
+  senderName: String,
+  senderRole: { type: String, enum: ["hod", "pd", "admin"] },
+  program: String,
+  department: String,
+  createdAt: { type: Date, default: Date.now }
 });
 
 const analyticsEventSchema = new mongoose.Schema({
@@ -285,9 +309,11 @@ const User = mongoose.model("User", userSchema);
 const Course = mongoose.model("Course", courseSchema);
 const Assignment = mongoose.model("Assignment", assignmentSchema);
 const Message = mongoose.model("Message", messageSchema);
-const Notification = mongoose.model("Notification", notificationSchema);
 const AnalyticsEvent = mongoose.model("AnalyticsEvent", analyticsEventSchema);
 const AnalyticsSession = mongoose.model("AnalyticsSession", analyticsSessionSchema);
+const Notification = mongoose.model("Notification", notificationSchema);
+const Schedule = mongoose.model("Schedule", scheduleSchema);
+const Broadcast = mongoose.model("Broadcast", broadcastSchema);
 
 // --- Helpers ---
 
@@ -2028,7 +2054,86 @@ function convertToCSV(events) {
   return [headers.join(","), ...rows].join("\n");
 }
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+// --- Class Schedule ---
+app.get("/api/schedule", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ id: req.user.id });
+    const query = {
+      $or: [
+        { type: "holiday" },
+        { program: user.program, semester: user.semester }
+      ]
+    };
+    if (["teacher", "hod", "coordinator", "pd"].includes(user.role)) {
+      delete query.$or;
+    }
+    const schedule = await Schedule.find(query);
+    res.json(schedule);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
+app.post("/api/schedule", authMiddleware, async (req, res) => {
+  if (!["hod", "coordinator", "admin"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+  try {
+    const { title, type, start, end, description, program, year, semester } = req.body;
+    const newEvent = new Schedule({
+      id: uuidv4(),
+      title, type, start, end, description, program, year, semester,
+      createdBy: req.user.id
+    });
+    await newEvent.save();
+    res.json(newEvent);
+  } catch (err) {
+    res.status(500).json({ message: "Error saving schedule" });
+  }
+});
+
+// --- Broadcasts ---
+app.get("/api/broadcasts", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ id: req.user.id });
+    const query = {};
+    if (user.role === "student" || user.role === "teacher") {
+      query.$or = [
+        { program: user.program },
+        { department: user.department },
+        { senderRole: "admin" }
+      ];
+    }
+    const broadcasts = await Broadcast.find(query).sort({ createdAt: -1 });
+    res.json(broadcasts);
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/broadcasts", authMiddleware, async (req, res) => {
+  if (!["hod", "pd", "admin"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Only HOD and PD can broadcast" });
+  }
+  try {
+    const { content, program, department } = req.body;
+    const user = await User.findOne({ id: req.user.id });
+    const newBroadcast = new Broadcast({
+      id: uuidv4(),
+      content,
+      senderId: req.user.id,
+      senderName: user.name,
+      senderRole: user.role,
+      program,
+      department,
+    });
+    await newBroadcast.save();
+    res.json(newBroadcast);
+  } catch (err) {
+    res.status(500).json({ message: "Error sending broadcast" });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
+});
