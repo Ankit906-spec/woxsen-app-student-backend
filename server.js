@@ -88,7 +88,7 @@ const __dirname = path.dirname(__filename);
 // --- Config ---
 const app = express();
 const PORT = process.env.PORT || 4000;
-const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-this";
+const JWT_SECRET = process.env.JWT_SECRET || "super-secret-jwt-key-981287918273";
 const MONGODB_URI =
   process.env.MONGODB_URI ||
   "mongodb+srv://pptkumar_db_user:<db_password>@student-cluster.u2hbhrq.mongodb.net/student-portal?retryWrites=true&w=majority";
